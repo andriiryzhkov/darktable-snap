@@ -16,7 +16,6 @@ apps:
     extensions: [gnome]
     environment:
       GTK_USE_PORTAL: 0
-      DISABLE_WAYLAND: 1
     plugs:
       - opengl
       - home
@@ -30,7 +29,6 @@ apps:
     extensions: [gnome]
     environment:
       GTK_USE_PORTAL: 0
-      DISABLE_WAYLAND: 1
     plugs:
       - opengl
       - home
@@ -79,8 +77,12 @@ parts:
     darktable:
         plugin: cmake
         source: https://github.com/darktable-org/darktable.git
+        source-tag: release-5.6.2
         cmake-parameters:
             - -DCMAKE_BUILD_TYPE=RelWithDebInfo
+            # the patches below leave the tree modified, so git describe would say
+            # 5.6.2+dirty. Keep in sync with source-tag
+            - -DPROJECT_VERSION=5.6.2
             # Place the data alongside that coming from stage-packages (e.g. the lensfun database)
             - -DCMAKE_INSTALL_PREFIX=/usr
             # Support Lua scripts by way of internal Lua implementation
@@ -93,10 +95,17 @@ parts:
             - -DCMAKE_VERBOSE_MAKEFILE=ON
             - -DCMAKE_CXX_FLAGS="-Wno-deprecated-register"
             - -DUSE_COLORD=ON
+            # AI features, with ONNX Runtime from the onnxruntime part; never download it
+            - -DUSE_AI=ON
+            - -DONNXRUNTIME_OFFLINE=ON
+            # only lut3d's compressed .gmz LUTs use G'MIC, and since 5.6 a missing
+            # G'MIC fails the configure instead of being skipped
+            - -DUSE_GMIC=OFF
         parse-info:
           - usr/share/metainfo/org.darktable.darktable.appdata.xml
         stage-packages:
             - git
+            - libarchive13t64
             - libasn1-8-heimdal
             - libavif16
             - libcurl3-gnutls
@@ -117,6 +126,7 @@ parts:
             - liblensfun1
             - libnghttp2-14
             - libopenexr-3-1-30
+            - libpotrace0
             - libpugixml1v5
             - libroken19t64-heimdal
             - librtmp1
@@ -125,6 +135,7 @@ parts:
             - libwind0-heimdal
         build-packages:
             - intltool
+            - libarchive-dev
             - libavif-dev
             - libexiv2-dev
             - libgraphicsmagick1-dev
@@ -132,6 +143,7 @@ parts:
             - liblensfun-dev
             - libgphoto2-dev
             - libopenexr-dev
+            - libpotrace-dev
             - libpugixml-dev
             - libsdl2-dev
             - libsm-dev
@@ -153,14 +165,53 @@ parts:
           patch -p0 < "${CRAFT_PROJECT_DIR}/snap/local/patches/darktable-math_h.patch"
           patch -p0 < "${CRAFT_PROJECT_DIR}/snap/local/patches/darktable-dttypes_h.patch"
         override-build: |
+          # FindONNXRuntime.cmake takes a copy in the build tree, where its own
+          # download would land, and install puts the library in the module
+          # directory. Not src/external: the module patches ORT's cmake files and
+          # darktable sets CMAKE_DISABLE_SOURCE_CHANGES
+          rm -rf "${CRAFT_PART_BUILD_WORK}/_deps/onnxruntime"
+          mkdir -p "${CRAFT_PART_BUILD_WORK}/_deps"
+          cp -a "${CRAFT_STAGE}/onnxruntime" "${CRAFT_PART_BUILD_WORK}/_deps/onnxruntime"
           craftctl default
           PYTHONPATH=${CRAFT_PART_INSTALL}/usr/lib/python3/dist-packages ${CRAFT_PART_INSTALL}/usr/bin/lensfun-update-data || echo No updates
           if [ -d /var/lib/lensfun-updates/version_1/ ]; then
             cp /var/lib/lensfun-updates/version_1/* ${CRAFT_PART_INSTALL}/usr/share/lensfun/version_1/
           fi
         after:
+            - onnxruntime
             - osmgpsmap
             - colord
+
+    onnxruntime:
+        # Prebuilt ONNX Runtime for darktable's AI features: noble has no package.
+        # Checked here because source-checksum cannot vary by architecture.
+        plugin: nil
+        build-packages:
+            - curl
+        override-pull: |
+          version=1.29.1
+          case "${CRAFT_ARCH_BUILD_FOR}" in
+            amd64)
+              pkg="onnxruntime-linux-x64-${version}.tgz"
+              sha256=a28d7d65acafc06fb0f416cb409998773f5314c7eebf77caf907812831cdfc67 ;;
+            arm64)
+              pkg="onnxruntime-linux-aarch64-${version}.tgz"
+              sha256=e53fc0cfb72e505031e06e13c651c1cb78424f39f15d304f47a3d5b907bcf9f2 ;;
+            *)
+              echo "no ONNX Runtime package for ${CRAFT_ARCH_BUILD_FOR}" >&2
+              exit 1 ;;
+          esac
+          cd "${CRAFT_PART_SRC}"
+          curl -fsSL -o "${pkg}" "https://github.com/microsoft/onnxruntime/releases/download/v${version}/${pkg}"
+          echo "${sha256}  ${pkg}" | sha256sum -c -
+          tar -xzf "${pkg}" --strip-components=1
+          rm "${pkg}"
+        override-build: |
+          mkdir -p "${CRAFT_PART_INSTALL}/onnxruntime"
+          cp -a "${CRAFT_PART_SRC}/include" "${CRAFT_PART_SRC}/lib" "${CRAFT_PART_INSTALL}/onnxruntime/"
+        # build input only: darktable installs the library it needs
+        prime:
+            - -onnxruntime
 
     colord:
       source: https://www.freedesktop.org/software/colord/releases/colord-gtk-0.3.0.tar.xz
